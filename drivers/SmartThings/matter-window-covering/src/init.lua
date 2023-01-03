@@ -22,6 +22,11 @@ local MatterDriver = require "st.matter.driver"
 -- local global variables
 local DEFAULT_LEVEL = 0
 local OPERATIONAL_STATUS_MASK = 0x3 -- only check the last two bits
+local OPERATIONAL_STATUS_NOT_MOVING = 0
+local OPERATIONAL_STATUS_OPENING = 1
+local OPERATIONAL_STATUS_CLOSING = 2
+
+local is_moving_by_set_shade_level = false
 
 local function device_init(driver, device)
   device:subscribe()
@@ -79,10 +84,30 @@ local function handle_shade_level(driver, device, cmd)
                 device, endpoint_id, hundredths_lift_percentage
               )
   device:send(req)
+  is_moving_by_set_shade_level = true
 end
 
 -- current lift percentage, changed to 100ths percent
 local function current_pos_handler(driver, device, ib, response)
+  local function get_operational_status()
+    local state = device:get_latest_state(
+                    "main", capabilities.windowShade.ID,
+                      capabilities.windowShade.windowShade.NAME
+                  ) or OPERATIONAL_STATUS_NOT_MOVING
+    for _, rb in ipairs(response.info_blocks) do
+      if rb.info_block.attribute_id == clusters.WindowCovering.attributes.OperationalStatus.ID and
+         rb.info_block.cluster_id == clusters.WindowCovering.ID then
+        state = rb.info_block.data.value & OPERATIONAL_STATUS_MASK -- get last two bits
+      end
+    end
+    return state
+  end
+
+  if is_moving_by_set_shade_level and
+     get_operational_status() ~= OPERATIONAL_STATUS_NOT_MOVING then
+    return
+  end
+
   if ib.data.value ~= nil then
     local position = 100 - math.floor((ib.data.value / 100))
     device:emit_event_for_endpoint(
@@ -108,6 +133,7 @@ local function current_status_handler(driver, device, ib, response)
 
   if ib.data.value ~= nil then
     if state == 0 then -- not moving
+      is_moving_by_set_shade_level = false
       if position == 100 then -- open
         device:emit_event_for_endpoint(ib.endpoint_id, attr.open())
       elseif position == 0 then -- closed
